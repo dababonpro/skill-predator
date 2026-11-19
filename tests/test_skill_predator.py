@@ -441,6 +441,7 @@ def test_evolve_and_fuse_evidence(tmp_path: Path):
     assert not any("**beta-skill**" in ln and "tool error" in ln for ln in evolve.splitlines())
     assert "**alpha-skill** + **beta-skill**" in text
     assert "co-occurred in 2 session(s)" in text
+    assert "overlapping" not in text
 
 
 def test_fuse_requires_min_cooccur_even_when_descriptions_overlap(tmp_path: Path):

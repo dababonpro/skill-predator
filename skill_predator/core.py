@@ -1285,7 +1285,7 @@ def write_evolve(cfg: PredatorConfig, today: str, min_cooccur: int = 2) -> Path:
     else:
         lines.append("- None detected (no silent misses or tool errors while skills were active).")
 
-    lines += ["", "## Fuse candidates (combine 2+ co-occurring/overlapping skills)", ""]
+    lines += ["", "## Fuse candidates (skills that share at least the minimum sessions)", ""]
     if fuse_rows:
         for count, jacc, (a, b), saved in fuse_rows:
             budget_note = f", est. ~{saved} chars description savings" if saved else ""
