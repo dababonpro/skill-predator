@@ -1154,3 +1154,146 @@ def excrete_skill(cfg: PredatorConfig, today: str, skill_name: str, winner: str,
     entry["winner"] = winner
     save_lock(cfg, lock)
     return dest
+
+
+def collect_evolve_evidence(cfg: PredatorConfig, today: str, days: int = TRANSCRIPT_DAYS) -> dict:
+    """Mine recent transcripts for per-skill invocations, tool errors, silent misses, and co-occurrence."""
+    lock = load_lock(cfg)
+    signatures = {name: entry.get("signatures") or [] for name, entry in (lock.get("skills") or {}).items()}
+    compiled = {s: [re.compile(p, re.IGNORECASE) for p in pats] for s, pats in signatures.items() if pats}
+
+    invocations: dict[str, int] = {}
+    tool_errors: dict[str, int] = {}
+    silent_misses: dict[str, int] = {}
+    cooccur: dict[tuple[str, str], int] = {}
+
+    if cfg.projects_dir and cfg.projects_dir.is_dir():
+        cutoff = datetime.combine(date.fromisoformat(today) - timedelta(days=days), datetime.min.time())
+        for jsonl in sorted(cfg.projects_dir.rglob("*.jsonl")):
+            if "subagents" in jsonl.parts:
+                continue
+            try:
+                if datetime.fromtimestamp(jsonl.stat().st_mtime) < cutoff:
+                    continue
+            except OSError:
+                continue
+
+            session_skills: list[str] = []
+            session_errors = 0
+            command_texts: list[str] = []
+
+            for raw in jsonl.read_text(encoding="utf-8", errors="replace").splitlines():
+                if not raw.strip():
+                    continue
+                try:
+                    rec = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                content = (rec.get("message") or {}).get("content")
+                if not isinstance(content, list):
+                    continue
+                for part in content:
+                    if not isinstance(part, dict):
+                        continue
+                    ptype = part.get("type")
+                    if ptype == "tool_use":
+                        tname = part.get("name", "")
+                        tinp = part.get("input") or {}
+                        if tname == "Skill":
+                            sname = str(tinp.get("skill", "")).split(":")[-1].strip()
+                            if sname and sname not in session_skills:
+                                session_skills.append(sname)
+                        elif compiled and tname == "Bash":
+                            command_texts.append(str(tinp.get("command", "")))
+                        elif compiled and tname.startswith("mcp__"):
+                            command_texts.append(tname + " " + json.dumps(tinp, ensure_ascii=False))
+                    elif ptype == "tool_result" and part.get("is_error") is True:
+                        session_errors += 1
+
+            for sname in session_skills:
+                invocations[sname] = invocations.get(sname, 0) + 1
+                if session_errors:
+                    tool_errors[sname] = tool_errors.get(sname, 0) + session_errors
+
+            unique_sorted = sorted(session_skills)
+            for i in range(len(unique_sorted)):
+                for j in range(i + 1, len(unique_sorted)):
+                    pair = (unique_sorted[i], unique_sorted[j])
+                    cooccur[pair] = cooccur.get(pair, 0) + 1
+
+            if compiled and command_texts:
+                blob = "\n".join(command_texts)
+                active_set = set(session_skills)
+                for skill, regexes in compiled.items():
+                    if skill in active_set:
+                        continue
+                    if any(rx.search(blob) for rx in regexes):
+                        silent_misses[skill] = silent_misses.get(skill, 0) + 1
+
+    return {
+        "invocations": invocations,
+        "tool_errors": tool_errors,
+        "silent_misses": silent_misses,
+        "cooccur": cooccur,
+    }
+
+
+def write_evolve(cfg: PredatorConfig, today: str, min_cooccur: int = 2) -> Path:
+    """Propose data-driven Evolve (level-up) and Fuse (combine 2+) candidates from session transcripts."""
+    ev = collect_evolve_evidence(cfg, today)
+    own = {s["name"]: s for s in discover_skills(cfg, include_stomach=False) if s["source"] == "own"}
+
+    evolve_rows: list[tuple[int, str, str]] = []
+    for name in sorted(set(own) | set(ev["invocations"]) | set(ev["silent_misses"])):
+        misses = ev["silent_misses"].get(name, 0)
+        errs = ev["tool_errors"].get(name, 0)
+        invs = ev["invocations"].get(name, 0)
+        if misses > 0 or errs > 0:
+            reasons = []
+            if misses:
+                reasons.append(f"{misses} silent miss(es) -> tighten trigger description")
+            if errs:
+                reasons.append(f"{errs} tool error(s) across {invs} session(s) -> convert fragile prose step to script")
+            evolve_rows.append((misses * 3 + errs, name, "; ".join(reasons)))
+    evolve_rows.sort(key=lambda r: r[0], reverse=True)
+
+    fuse_rows: list[tuple[int, float, tuple[str, str], int]] = []
+    for (a, b), count in ev["cooccur"].items():
+        jacc = 0.0
+        if a in own and b in own:
+            jacc = round(_jaccard(_content_words(own[a]["description"]), _content_words(own[b]["description"])), 2)
+        if count >= min_cooccur or (count >= 1 and jacc >= JACCARD_THRESHOLD):
+            saved_chars = min(len(own[a]["description"]), len(own[b]["description"])) if (a in own and b in own) else 0
+            fuse_rows.append((count, jacc, (a, b), saved_chars))
+    fuse_rows.sort(key=lambda r: (r[0], r[1]), reverse=True)
+
+    lines = [
+        f"# Skill Evolve & Fuse Proposals — {today}",
+        "",
+        f"Window: last {TRANSCRIPT_DAYS} days of Claude Code transcripts (`{cfg.projects_dir}`).",
+        "",
+        "## Evolve candidates (level up an existing skill)",
+        "",
+    ]
+    if evolve_rows:
+        for _, name, reason in evolve_rows:
+            scope = "own" if name in own else "external"
+            lines.append(f"- **{name}** (`{scope}`): {reason}")
+    else:
+        lines.append("- None detected (no silent misses or tool errors while skills were active).")
+
+    lines += ["", "## Fuse candidates (combine 2+ co-occurring/overlapping skills)", ""]
+    if fuse_rows:
+        for count, jacc, (a, b), saved in fuse_rows:
+            budget_note = f", est. ~{saved} chars description savings" if saved else ""
+            lines.append(
+                f"- **{a}** + **{b}** — co-occurred in {count} session(s), description Jaccard {jacc}{budget_note} "
+                "(guardrail: fuse only if handoff friction or budget improves, then prompt-test before excreting)"
+            )
+    else:
+        lines.append(f"- None detected (no pairs with >= {min_cooccur} co-occurrences or co-occurring overlap >= {JACCARD_THRESHOLD}).")
+
+    cfg.out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = cfg.out_dir / f"{today}-evolve.md"
+    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return out_path

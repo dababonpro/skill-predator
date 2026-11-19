@@ -13,6 +13,7 @@ from skill_predator.core import (
     excrete_skill,
     sort_merge_files,
     write_analyse,
+    write_evolve,
     write_hunt,
     write_hunt_for,
     write_update,
@@ -51,6 +52,11 @@ def main(argv: list[str] | None = None) -> int:
     p_update = sub.add_parser("update", help="check adopted skills against upstream and copies for drift")
     _add_common(p_update)
     p_update.add_argument("--fetch", action="store_true", help="git pull --ff-only in stomach packs first")
+
+    p_evolve = sub.add_parser("evolve", help="propose data-driven skill upgrades (evolve) and combinations (fuse)")
+    _add_common(p_evolve)
+    p_evolve.add_argument("--projects", default=None, help="Claude Code transcripts folder")
+    p_evolve.add_argument("--min-cooccur", type=int, default=2, help="minimum shared sessions to propose fusion")
 
     p_excrete = sub.add_parser("excrete", help="archive a losing skill outside skills/")
     _add_common(p_excrete)
@@ -100,6 +106,10 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.cmd == "update":
             out = write_update(cfg, today, fetch=args.fetch)
+            print(f"wrote {out}")
+            return 0
+        if args.cmd == "evolve":
+            out = write_evolve(cfg, today, min_cooccur=args.min_cooccur)
             print(f"wrote {out}")
             return 0
         if args.cmd == "excrete":

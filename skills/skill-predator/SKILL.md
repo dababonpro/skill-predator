@@ -16,7 +16,8 @@ Hunt, devour, isolate, analyse, and selectively absorb agent skills without losi
 | `isolate` | Stomach inventory (runs automatically in `devour`) | No |
 | `analyse` | Reports and proposals | No |
 | `mimic` | Live `skills/` (merge steps with credit) | Yes |
-| `evolve` | Live `skills/` (stronger merged skill) | Yes |
+| `evolve` | Live `skills/` (level up from session data) | Yes |
+| `fuse` | Live `skills/` -> `archive/skills/<name>/` | Yes |
 | `excrete` | Live `skills/` -> `archive/skills/<name>/` | Yes |
 
 ## Rules
@@ -29,6 +30,7 @@ Hunt, devour, isolate, analyse, and selectively absorb agent skills without losi
 skill-predator hunt --root . [--for "<job in words>"]
 skill-predator devour --root . [--url <git url> | --path <folder>]
 skill-predator analyse --root . [--pack <name>]
+skill-predator evolve --root . [--min-cooccur 2]
 skill-predator update --root . [--fetch]
 skill-predator excrete --root . --skill <name> --winner <winner> [--apply]
 skill-predator merge-plan --root . --ours <skill> --theirs <folder>

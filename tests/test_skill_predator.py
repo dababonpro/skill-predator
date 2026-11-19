@@ -392,3 +392,50 @@ def test_git_head_commit_uses_this_checkout():
         pytest.skip("not a git checkout")
     commit = _git_head_commit(repo)
     assert commit.isalnum()
+
+
+def test_evolve_and_fuse_evidence(tmp_path: Path):
+    from skill_predator.core import write_evolve
+
+    root = tmp_path / "ws"
+    projects = tmp_path / "projects" / "repo-a"
+    projects.mkdir(parents=True)
+
+    _write_skill(root / "skills", "alpha-skill", "Manage notes and create structured markdown files.")
+    _write_skill(root / "skills", "beta-skill", "Update notes and keep structured markdown links.")
+    (root / "skills" / "sources.json").write_text(
+        json.dumps({
+            "skills": {
+                "alpha-skill": {"origin": "own", "signatures": [r"note_helper\.py"]},
+                "beta-skill": {"origin": "own"},
+            },
+            "prey": {},
+        }),
+        encoding="utf-8",
+    )
+
+    # Session 1 & 2: alpha-skill + beta-skill co-occur, and alpha-skill sees a tool error
+    for idx in (1, 2):
+        (projects / f"sess-{idx}.jsonl").write_text(
+            "\n".join([
+                json.dumps({"message": {"content": [{"type": "tool_use", "name": "Skill", "input": {"skill": "alpha-skill"}}]}}),
+                json.dumps({"message": {"content": [{"type": "tool_use", "name": "Skill", "input": {"skill": "beta-skill"}}]}}),
+                json.dumps({"message": {"content": [{"type": "tool_result", "is_error": True, "content": "boom"}]}}),
+            ]) + "\n",
+            encoding="utf-8",
+        )
+
+    # Session 3: silent miss for alpha-skill
+    (projects / "sess-3.jsonl").write_text(
+        json.dumps({"message": {"content": [{"type": "tool_use", "name": "Bash", "input": {"command": "python note_helper.py"}}]}}),
+        encoding="utf-8",
+    )
+
+    cfg = PredatorConfig.load(root, projects_dir=tmp_path / "projects", plugins_dir=tmp_path / "none", stomach_dir=tmp_path / "none")
+    out = write_evolve(cfg, "2026-11-19", min_cooccur=2)
+    text = out.read_text(encoding="utf-8")
+    assert "**alpha-skill**" in text
+    assert "1 silent miss(es)" in text
+    assert "2 tool error(s)" in text
+    assert "**alpha-skill** + **beta-skill**" in text
+    assert "co-occurred in 2 session(s)" in text
