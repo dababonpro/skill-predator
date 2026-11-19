@@ -16,13 +16,12 @@ Hunt, devour, isolate, analyse, and selectively absorb agent skills without losi
 | `isolate` | Stomach inventory (runs automatically in `devour`) | No |
 | `analyse` | Reports and proposals | No |
 | `mimic` | Live `skills/` (merge steps with credit) | Yes |
-| `evolve` | Live `skills/` (level up from session data) | Yes |
-| `fuse` | Live `skills/` -> `archive/skills/<name>/` | Yes |
+| `evolve` | `reviews/skills/YYYY-MM-DD-evolve.md` | No |
 | `excrete` | Live `skills/` -> `archive/skills/<name>/` | Yes |
 
 ## Rules
 
-1. **Fierce in the stomach, careful in the body.** `hunt`, `analyse`, and `update` never edit `skills/<name>/`. `update` only writes a report; `update --fetch` may pull stomach clones and records a fetch failure instead of pretending the pull worked. `devour` copies or clones into the stomach and may update prey metadata in `skills/sources.json`. It does not edit skill content. Any change to a live skill (`mimic`, `evolve`, `excrete --apply`, or disabling a plugin skill in `~/.claude/settings.json`) is proposed with a diff and applied only after explicit user approval. `excrete` without `--apply` prints the archive path and moves nothing.
+1. **Fierce in the stomach, careful in the body.** `hunt`, `analyse`, `evolve`, and `update` never edit `skills/<name>/`. `evolve` writes `reviews/skills/YYYY-MM-DD-evolve.md` and does not edit `skills/<name>/`. A fuse idea is a section of that report, not a command. `update` only writes a report; `update --fetch` may pull stomach clones and records a fetch failure instead of pretending the pull worked. `devour` copies or clones into the stomach and may update prey metadata in `skills/sources.json`. It does not edit skill content. Any change to a live skill (`mimic`, `excrete --apply`, applying an evolve or fuse proposal, or disabling a plugin skill in `~/.claude/settings.json`) is proposed with a diff and applied only after explicit user approval. `excrete` without `--apply` prints the archive path and moves nothing.
 2. **Isolate code; never run it.** List every script, hook, installer, dependency list, and network call in devoured prey. Never execute them, and never move a skill carrying them into `skills/` until the user has read them. `git clone` and `git pull` run with repository hooks disabled and interactive prompts off. Symlinks and Windows junctions are not followed or copied.
 3. **Deterministic report first.** Run the CLI before judging:
 

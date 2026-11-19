@@ -414,13 +414,13 @@ def test_evolve_and_fuse_evidence(tmp_path: Path):
         encoding="utf-8",
     )
 
-    # Session 1 & 2: alpha-skill + beta-skill co-occur, and alpha-skill sees a tool error
+    # Session 1 & 2: both skills run. The error lands while alpha-skill is the latest one.
     for idx in (1, 2):
         (projects / f"sess-{idx}.jsonl").write_text(
             "\n".join([
                 json.dumps({"message": {"content": [{"type": "tool_use", "name": "Skill", "input": {"skill": "alpha-skill"}}]}}),
-                json.dumps({"message": {"content": [{"type": "tool_use", "name": "Skill", "input": {"skill": "beta-skill"}}]}}),
                 json.dumps({"message": {"content": [{"type": "tool_result", "is_error": True, "content": "boom"}]}}),
+                json.dumps({"message": {"content": [{"type": "tool_use", "name": "Skill", "input": {"skill": "beta-skill"}}]}}),
             ]) + "\n",
             encoding="utf-8",
         )
@@ -434,8 +434,40 @@ def test_evolve_and_fuse_evidence(tmp_path: Path):
     cfg = PredatorConfig.load(root, projects_dir=tmp_path / "projects", plugins_dir=tmp_path / "none", stomach_dir=tmp_path / "none")
     out = write_evolve(cfg, "2026-11-19", min_cooccur=2)
     text = out.read_text(encoding="utf-8")
-    assert "**alpha-skill**" in text
-    assert "1 silent miss(es)" in text
-    assert "2 tool error(s)" in text
+    evolve = text.split("## Fuse candidates")[0]
+    assert "**alpha-skill**" in evolve
+    assert "1 silent miss(es)" in evolve
+    assert "2 tool error(s)" in evolve
+    assert not any("**beta-skill**" in ln and "tool error" in ln for ln in evolve.splitlines())
     assert "**alpha-skill** + **beta-skill**" in text
     assert "co-occurred in 2 session(s)" in text
+
+
+def test_fuse_requires_min_cooccur_even_when_descriptions_overlap(tmp_path: Path):
+    from skill_predator.core import write_evolve
+
+    root = tmp_path / "ws"
+    projects = tmp_path / "projects" / "repo-a"
+    projects.mkdir(parents=True)
+    _write_skill(root / "skills", "alpha-skill", "Manage notes and create structured markdown files.")
+    _write_skill(root / "skills", "beta-skill", "Update notes and keep structured markdown links.")
+    (projects / "sess-1.jsonl").write_text(
+        "\n".join([
+            json.dumps({"message": {"content": [{"type": "tool_use", "name": "Skill", "input": {"skill": "alpha-skill"}}]}}),
+            json.dumps({"message": {"content": [{"type": "tool_use", "name": "Skill", "input": {"skill": "beta-skill"}}]}}),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+    cfg = PredatorConfig.load(root, projects_dir=tmp_path / "projects", plugins_dir=tmp_path / "none", stomach_dir=tmp_path / "none")
+    out = write_evolve(cfg, "2026-11-19", min_cooccur=2)
+    text = out.read_text(encoding="utf-8")
+    assert "**alpha-skill** + **beta-skill**" not in text
+    assert "no pairs with >= 2 shared sessions" in text
+
+
+def test_skill_spec_says_evolve_only_writes_a_report():
+    text = (Path(__file__).resolve().parents[1] / "skills" / "skill-predator" / "SKILL.md").read_text(encoding="utf-8")
+    assert "| `evolve` | `reviews/skills/YYYY-MM-DD-evolve.md` | No |" in text
+    assert "| `fuse` |" not in text
+    assert "`evolve` writes `reviews/skills/YYYY-MM-DD-evolve.md` and does not edit `skills/<name>/`" in text

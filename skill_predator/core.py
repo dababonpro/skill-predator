@@ -1179,7 +1179,8 @@ def collect_evolve_evidence(cfg: PredatorConfig, today: str, days: int = TRANSCR
                 continue
 
             session_skills: list[str] = []
-            session_errors = 0
+            active_skill: str | None = None
+            session_skill_errors: dict[str, int] = {}
             command_texts: list[str] = []
 
             for raw in jsonl.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -1201,19 +1202,21 @@ def collect_evolve_evidence(cfg: PredatorConfig, today: str, days: int = TRANSCR
                         tinp = part.get("input") or {}
                         if tname == "Skill":
                             sname = str(tinp.get("skill", "")).split(":")[-1].strip()
-                            if sname and sname not in session_skills:
-                                session_skills.append(sname)
+                            if sname:
+                                active_skill = sname
+                                if sname not in session_skills:
+                                    session_skills.append(sname)
                         elif compiled and tname == "Bash":
                             command_texts.append(str(tinp.get("command", "")))
                         elif compiled and tname.startswith("mcp__"):
                             command_texts.append(tname + " " + json.dumps(tinp, ensure_ascii=False))
-                    elif ptype == "tool_result" and part.get("is_error") is True:
-                        session_errors += 1
+                    elif ptype == "tool_result" and part.get("is_error") is True and active_skill:
+                        session_skill_errors[active_skill] = session_skill_errors.get(active_skill, 0) + 1
 
             for sname in session_skills:
                 invocations[sname] = invocations.get(sname, 0) + 1
-                if session_errors:
-                    tool_errors[sname] = tool_errors.get(sname, 0) + session_errors
+            for sname, count in session_skill_errors.items():
+                tool_errors[sname] = tool_errors.get(sname, 0) + count
 
             unique_sorted = sorted(session_skills)
             for i in range(len(unique_sorted)):
@@ -1247,13 +1250,12 @@ def write_evolve(cfg: PredatorConfig, today: str, min_cooccur: int = 2) -> Path:
     for name in sorted(set(own) | set(ev["invocations"]) | set(ev["silent_misses"])):
         misses = ev["silent_misses"].get(name, 0)
         errs = ev["tool_errors"].get(name, 0)
-        invs = ev["invocations"].get(name, 0)
         if misses > 0 or errs > 0:
             reasons = []
             if misses:
                 reasons.append(f"{misses} silent miss(es) -> tighten trigger description")
             if errs:
-                reasons.append(f"{errs} tool error(s) across {invs} session(s) -> convert fragile prose step to script")
+                reasons.append(f"{errs} tool error(s) while it was the latest skill invoked -> convert fragile prose step to script")
             evolve_rows.append((misses * 3 + errs, name, "; ".join(reasons)))
     evolve_rows.sort(key=lambda r: r[0], reverse=True)
 
@@ -1262,9 +1264,10 @@ def write_evolve(cfg: PredatorConfig, today: str, min_cooccur: int = 2) -> Path:
         jacc = 0.0
         if a in own and b in own:
             jacc = round(_jaccard(_content_words(own[a]["description"]), _content_words(own[b]["description"])), 2)
-        if count >= min_cooccur or (count >= 1 and jacc >= JACCARD_THRESHOLD):
-            saved_chars = min(len(own[a]["description"]), len(own[b]["description"])) if (a in own and b in own) else 0
-            fuse_rows.append((count, jacc, (a, b), saved_chars))
+        if count < min_cooccur:
+            continue
+        saved_chars = min(len(own[a]["description"]), len(own[b]["description"])) if (a in own and b in own) else 0
+        fuse_rows.append((count, jacc, (a, b), saved_chars))
     fuse_rows.sort(key=lambda r: (r[0], r[1]), reverse=True)
 
     lines = [
@@ -1291,7 +1294,7 @@ def write_evolve(cfg: PredatorConfig, today: str, min_cooccur: int = 2) -> Path:
                 "(guardrail: fuse only if handoff friction or budget improves, then prompt-test before excreting)"
             )
     else:
-        lines.append(f"- None detected (no pairs with >= {min_cooccur} co-occurrences or co-occurring overlap >= {JACCARD_THRESHOLD}).")
+        lines.append(f"- None detected (no pairs with >= {min_cooccur} shared sessions).")
 
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
     out_path = cfg.out_dir / f"{today}-evolve.md"
