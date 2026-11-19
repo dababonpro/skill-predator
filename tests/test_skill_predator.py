@@ -467,6 +467,13 @@ def test_fuse_requires_min_cooccur_even_when_descriptions_overlap(tmp_path: Path
     assert "no pairs with >= 2 shared sessions" in text
 
 
+def test_contributing_allows_devour_to_update_the_lock_file():
+    text = (Path(__file__).resolve().parents[1] / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    assert "may update prey entries in `skills/sources.json`" in text
+    assert "does not edit skill content" in text
+    assert "never modify live `skills/`" not in text
+
+
 def test_skill_spec_says_evolve_only_writes_a_report():
     text = (Path(__file__).resolve().parents[1] / "skills" / "skill-predator" / "SKILL.md").read_text(encoding="utf-8")
     assert "| `evolve` | `reviews/skills/YYYY-MM-DD-evolve.md` | No |" in text
