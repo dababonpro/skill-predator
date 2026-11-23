@@ -41,6 +41,11 @@ skill-predator merge-plan --root . --ours <skill> --theirs <folder>
 ## Verdicts (when analysing prey)
 
 - **Mimic:** A rival already does the job and prey adds steps/lessons it lacks. Rewrite new sections in house style with one credit line (`Adapted from <repo>, <licence>`). Record prey as `mimicked`.
-- **Evolve:** Prey does the job better, or combining both beats either. Use `skill-predator merge-plan --ours <skill> --theirs <folder>` to sort files into redundant, complementary, and conflicting; draft one stronger skill, test against 2-3 real past prompts, then excrete the loser.
+- **Evolve:** Prey does the job better, or combining both beats either. Use `skill-predator merge-plan --ours <skill> --theirs <folder>` to sort files into redundant, complementary, and conflicting; draft one stronger skill, test against 2-3 real past prompts (including at least one case the old version got wrong), then excrete the loser. Keep the test blind:
+  - Give each run the past prompt as the user typed it, in a folder with a project-shaped name. No "eval", "test", "judge", "benchmark" or "compare" in any path or prompt the run sees, and do not tell it another version exists.
+  - Judge which steps a run followed from its transcript (files it opened, tool calls it made) and from its output, never from what it says it did. Do not ask it to list the skills or steps it used.
+  - When comparing old and new, one judge scores both outputs on one written rubric, by neutral labels, without knowing which is which.
+
+  (Blinding adapted from the eval playbook in cursor/plugins pstack, MIT.)
 - **New:** No rival covers the job and it passes when-not-to-create rules (not one-off, not a 1-line rule, teaches non-obvious steps/scripts). Copy to `skills/` and record in `skills/sources.json`.
 - **Skip:** Already covered (~80%+), incompatible licence (GPL/CC-BY-SA cannot be mimicked into differently-licensed skills), or trivial. Record `skipped` with reason in `skills/sources.json`.
