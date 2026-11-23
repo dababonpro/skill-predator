@@ -4,6 +4,7 @@ from __future__ import annotations
 import difflib
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -14,6 +15,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
+from collections import Counter
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Iterable
@@ -663,24 +665,48 @@ def isolate_skill_folder(folder: Path) -> dict:
     }
 
 
+_LICENCE_FILE_RE = re.compile(r"^(licen[cs]e|copying)([-._].*)?$", re.IGNORECASE)
+
+
+def _licence_from_text(text: str) -> str:
+    if "MIT License" in text or "Permission is hereby granted, free of charge" in text:
+        return "MIT"
+    if "Apache License" in text and "Version 2.0" in text:
+        return "Apache-2.0"
+    if "CC-BY-SA" in text or "Attribution-ShareAlike" in text:
+        return "CC-BY-SA-4.0"
+    if "Creative Commons Attribution 4.0" in text or "CC-BY-4.0" in text or "CC BY 4.0" in text:
+        return "CC-BY-4.0"
+    if "GNU GENERAL PUBLIC LICENSE" in text:
+        return "GPL"
+    return "custom"
+
+
 def detect_pack_licence(pack_dir: Path) -> str:
-    for name in ("LICENSE", "LICENSE.md", "LICENSE.txt", "COPYING"):
-        p = pack_dir / name
-        if not p.is_file():
-            continue
-        text = p.read_text(encoding="utf-8", errors="replace")
-        if "MIT License" in text or "Permission is hereby granted, free of charge" in text:
-            return "MIT"
-        if "Apache License" in text and "Version 2.0" in text:
-            return "Apache-2.0"
-        if "CC-BY-SA" in text or "Attribution-ShareAlike" in text:
-            return "CC-BY-SA-4.0"
-        if "Creative Commons Attribution 4.0" in text or "CC-BY-4.0" in text or "CC BY 4.0" in text:
-            return "CC-BY-4.0"
-        if "GNU GENERAL PUBLIC LICENSE" in text:
-            return "GPL"
-        return "custom"
+    """Licence named by a LICENSE/LICENCE/COPYING file directly in ``pack_dir`` (links are not followed)."""
+    if not pack_dir.is_dir():
+        return "unknown"
+    for p in sorted(pack_dir.iterdir()):
+        if _LICENCE_FILE_RE.match(p.name) and not _is_reparse(p) and p.is_file():
+            return _licence_from_text(p.read_text(encoding="utf-8", errors="replace"))
     return "unknown"
+
+
+def detect_skill_licence(skill_dir: Path, pack_dir: Path) -> str:
+    """Nearest licence file from the skill folder up to the pack root.
+
+    A monorepo often keeps each plugin's LICENSE in the plugin folder rather than the repo
+    root (cursor/plugins keeps pstack's at ``pstack/LICENSE``), so the root alone reads "unknown".
+    """
+    pack_dir = pack_dir.resolve()
+    folder = skill_dir.resolve()
+    while True:
+        found = detect_pack_licence(folder)
+        if found != "unknown":
+            return found
+        if folder == pack_dir or pack_dir not in folder.parents:
+            return "unknown"
+        folder = folder.parent
 
 
 def _git_head_commit(folder: Path) -> str:
@@ -696,9 +722,48 @@ def _git_head_commit(folder: Path) -> str:
     return res.stdout.strip() if res.returncode == 0 else ""
 
 
+_GITHUB_TREE_RE = re.compile(r"^https://github\.com/([^/]+)/([^/]+?)(?:\.git)?/tree/([^/]+)/(.+?)/?$")
+
+
+def parse_github_tree_url(url: str) -> tuple[str, str, str] | None:
+    """Split a GitHub folder link into (clone URL, ref, folder path), or None for any other URL.
+
+    The ref is the first segment after ``/tree/``, so a branch name containing "/" is not supported.
+    """
+    m = _GITHUB_TREE_RE.match(url.strip())
+    if not m:
+        return None
+    owner, repo, ref, subpath = m.groups()
+    return f"https://github.com/{owner}/{repo}.git", ref, subpath
+
+
 def _pack_name_from_url(url: str) -> str:
+    tree = parse_github_tree_url(url)
+    if tree:
+        return tree[2].rstrip("/").rsplit("/", 1)[-1]
     tail = url.rstrip("/").rsplit("/", 1)[-1]
     return tail[:-4] if tail.endswith(".git") else tail
+
+
+def _clone_pack(url: str, dest: Path) -> None:
+    """Clone a pack; for a GitHub folder link, sparse-check-out only that folder."""
+    tree = parse_github_tree_url(url)
+    if not tree:
+        steps = [["clone", "--", url, str(dest)]]
+    else:
+        clone_url, ref, subpath = tree
+        steps = [
+            ["clone", "--filter=blob:none", "--no-checkout", "--", clone_url, str(dest)],
+            ["-C", str(dest), "sparse-checkout", "set", "--", subpath],
+            ["-C", str(dest), "checkout", ref, "--"],
+        ]
+    for args in steps:
+        res = _run_git(args, timeout=120)
+        if res.returncode != 0:
+            detail = (res.stderr or res.stdout).strip() or str(res.returncode)
+            if dest.exists():
+                _remove_tree(dest)
+            raise RuntimeError(f"git clone failed for {url}: {detail}")
 
 
 def devour_packs(cfg: PredatorConfig, today: str, url: str | None = None, path: Path | None = None) -> Path:
@@ -708,10 +773,7 @@ def devour_packs(cfg: PredatorConfig, today: str, url: str | None = None, path: 
     if url:
         dest = cfg.stomach_dir / _pack_name_from_url(url)
         if not dest.exists():
-            res = _run_git(["clone", "--", url, str(dest)], timeout=60)
-            if res.returncode != 0:
-                detail = (res.stderr or res.stdout).strip() or str(res.returncode)
-                raise RuntimeError(f"git clone failed for {url}: {detail}")
+            _clone_pack(url, dest)
         targets.append(dest)
     elif path:
         src = path.resolve()
@@ -737,8 +799,9 @@ def devour_packs(cfg: PredatorConfig, today: str, url: str | None = None, path: 
     for pack_dir in targets:
         pack_name = pack_dir.name
         commit = _git_head_commit(pack_dir)
-        licence = detect_pack_licence(pack_dir)
-        lines.extend([f"## {pack_name}", "", f"- Commit: `{commit or 'none'}` | Licence: `{licence}`", ""])
+        pack_licence = detect_pack_licence(pack_dir)
+        licence_label = pack_licence if pack_licence != "unknown" else "none at root; see each skill"
+        lines.extend([f"## {pack_name}", "", f"- Commit: `{commit or 'none'}` | Licence: `{licence_label}`", ""])
         seen: set[tuple[str, str]] = set()
         for skill_md in iter_files(pack_dir, "SKILL.md"):
             info = parse_skill_md(skill_md)
@@ -747,6 +810,7 @@ def devour_packs(cfg: PredatorConfig, today: str, url: str | None = None, path: 
                 continue
             seen.add(dedup_key)
             total_skills += 1
+            licence = detect_skill_licence(skill_md.parent, pack_dir)
             iso = isolate_skill_folder(skill_md.parent)
             if iso["isolated"]:
                 total_isolated += 1
@@ -762,8 +826,12 @@ def devour_packs(cfg: PredatorConfig, today: str, url: str | None = None, path: 
                 "isolated": iso["isolated"],
                 "sha256": folder_sha256(skill_md.parent),
                 "sealed": {k: v for k, v in iso.items() if k != "isolated" and v},
+                **({"upstream": url} if url else {}),
             }
-            lines.append(f"- `{info['name']}`: **{'ISOLATED' if iso['isolated'] else 'clean'}** — lock state `{state}`")
+            licence_note = f" (licence={licence})" if licence != pack_licence else ""
+            lines.append(
+                f"- `{info['name']}`: **{'ISOLATED' if iso['isolated'] else 'clean'}**{licence_note} — lock state `{state}`"
+            )
         lines.append("")
 
     save_lock(cfg, lock)
@@ -775,17 +843,65 @@ def devour_packs(cfg: PredatorConfig, today: str, url: str | None = None, path: 
     return out_path
 
 
+_ANALYSE_DUPLICATE = 0.85
+_ANALYSE_COMPARE = 0.20
+_ANALYSE_GROUP_FLOOR = 0.10
+_SHORT_PROMPT_WORDS = 80
+
+
+def _content_tokens(text: str) -> list[str]:
+    return [w for w in _WORD_RE.findall(text.lower()) if w not in STOPWORDS and len(w) > 1]
+
+
+def _skill_tokens(skill: dict) -> list[str]:
+    return _content_tokens(f"{skill['name'].replace('-', ' ')} {skill['description']}")
+
+
+def _tfidf_vectors(docs: list[list[str]]) -> list[dict[str, float]]:
+    """Unit-length TF-IDF vectors. IDF down-weights words every skill uses ("skill", "agent", "user"),
+    which made plain word overlap pair unrelated skills on large packs. Full SKILL.md bodies were tried
+    and dropped: a few long, general skills became everyone's nearest rival."""
+    counts = [Counter(d) for d in docs]
+    n = len(counts)
+    df = Counter(w for c in counts for w in c)
+    vectors = []
+    for c in counts:
+        v = {w: (1 + math.log(tf)) * (math.log((1 + n) / (1 + df[w])) + 1) for w, tf in c.items()}
+        norm = math.sqrt(sum(x * x for x in v.values())) or 1.0
+        vectors.append({w: x / norm for w, x in v.items()})
+    return vectors
+
+
+def _cosine(a: dict[str, float], b: dict[str, float]) -> float:
+    if len(a) > len(b):
+        a, b = b, a
+    return sum(x * b.get(w, 0.0) for w, x in a.items())
+
+
+def _body_word_count(path: Path) -> int:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    if text.startswith("---"):
+        parts = text.split("---", 2)
+        if len(parts) == 3:
+            text = parts[2]
+    return len(_WORD_RE.findall(text.lower()))
+
+
 def write_analyse(cfg: PredatorConfig, today: str, pack: str | None = None) -> Path:
-    """Compare devoured stomach skills against territory rivals and propose initial verdicts."""
+    """Compare devoured stomach skills against territory rivals, propose initial verdicts,
+    and group a pack by nearest rival so a large pack can be read in a sensible order."""
     lock = load_lock(cfg)
     prey_lock = lock.get("prey") or {}
     territory = discover_skills(cfg, include_stomach=False)
-    stomach = [s for s in discover_skills(cfg, include_stomach=True) if s["source"].startswith("stomach:")]
-    if pack:
-        stomach = [s for s in stomach if s["source"] == f"stomach:{pack}"]
+    all_stomach = [s for s in discover_skills(cfg, include_stomach=True) if s["source"].startswith("stomach:")]
+    stomach = [s for s in all_stomach if s["source"] == f"stomach:{pack}"] if pack else all_stomach
 
-    t_words = [_content_words(t["description"]) for t in territory]
-    lines = [f"# Skill Analysis — {today}", ""]
+    # IDF comes from every skill we know, so a score does not depend on which pack is analysed.
+    vectors = _tfidf_vectors([_skill_tokens(s) for s in territory + all_stomach])
+    t_vecs = vectors[:len(territory)]
+    s_vec_by_id = {id(s): vectors[len(territory) + i] for i, s in enumerate(all_stomach)}
+
+    rows = []
     for prey in stomach:
         pack_name = prey["source"].split(":", 1)[1]
         prey_key = f"{pack_name}/{prey['name']}"
@@ -793,41 +909,92 @@ def write_analyse(cfg: PredatorConfig, today: str, pack: str | None = None) -> P
         licence = meta.get("licence", "unknown")
         isolated = meta.get("isolated", False)
         state = meta.get("state", "devoured")
+        words = _body_word_count(prey["path"])
 
-        p_words = _content_words(prey["description"])
-        scored = sorted(
-            ((_jaccard(p_words, t_words[i]), t) for i, t in enumerate(territory) if _jaccard(p_words, t_words[i]) > 0),
-            key=lambda item: item[0],
-            reverse=True,
-        )[:3]
-        best_jacc, best_rival = scored[0] if scored else (0.0, None)
+        pv = s_vec_by_id[id(prey)]
+        scored = [(_cosine(pv, tv), t) for tv, t in zip(t_vecs, territory)]
+        scored = sorted((item for item in scored if item[0] > 0), key=lambda item: item[0], reverse=True)
+        top_rivals = scored[:3]
+        best_score, best_rival = top_rivals[0] if top_rivals else (0.0, None)
         copyleft = licence in ("GPL", "CC-BY-SA-4.0")
 
         if state in ("skipped", "mimicked"):
-            verdict = f"Already `{state}`"
-        elif best_rival and best_jacc >= 0.8:
-            verdict = f"**Skip** (covered by `{best_rival['name']}` at Jaccard {best_jacc:.2f})"
-        elif best_rival and best_jacc >= JACCARD_THRESHOLD:
-            verdict = (
-                f"**Review (New-only / Skip)** — overlaps `{best_rival['name']}`, but `{licence}` blocks mimic"
-                if copyleft else f"**Mimic / Evolve** into `{best_rival['name']}` ({best_rival['source']}, Jaccard {best_jacc:.2f})"
-            )
+            kind, verdict = "done", f"Already `{state}`"
+        elif best_rival and best_score >= _ANALYSE_DUPLICATE:
+            kind, verdict = "skip", f"**Skip** (covered by `{best_rival['name']}` at score {best_score:.2f})"
+        elif best_rival and best_score >= _ANALYSE_COMPARE:
+            kind = "compare"
+            if copyleft:
+                verdict = f"**Review (New-only / Skip)** — overlaps `{best_rival['name']}`, but `{licence}` blocks mimic"
+            else:
+                verdict = f"**Mimic / Evolve** into `{best_rival['name']}` ({best_rival['source']}, score {best_score:.2f})"
+        elif words < _SHORT_PROMPT_WORDS:
+            kind, verdict = "short", f"**Review: likely Skip** (short prompt, {words} words: a one-line rule, not a skill)"
         else:
-            verdict = "**Review: New vs Skip** (no strong territory rival)"
+            kind, verdict = "review", "**Review: New vs Skip** (no strong territory rival)"
+        rows.append({
+            "key": prey_key, "kind": kind, "verdict": verdict, "licence": licence, "state": state,
+            "isolated": isolated, "rivals": top_rivals, "best": best_score, "best_rival": best_rival,
+        })
 
-        iso_note = " | **ISOLATED: read sealed files before promoting**" if isolated else ""
-        lines.extend([
-            f"### `{prey_key}`",
+    lines = [f"# Skill Analysis — {today}", ""]
+    if rows:
+        counts = {k: sum(1 for r in rows if r["kind"] == k) for k in ("skip", "compare", "review", "short", "done")}
+        lines += [
+            "## Summary",
             "",
-            f"- Verdict: {verdict}{iso_note}",
-            f"- Licence: `{licence}` | Lock state: `{state}`",
-            f"- Nearest rivals: {', '.join(f'`{t['name']}` ({t['source']}, J={j:.2f})' for j, t in scored) or 'none'}",
-            "",
-        ])
+            f"- {len(rows)} skill(s): {counts['skip']} skip as duplicates, {counts['compare']} to compare with a named rival, "
+            f"{counts['review']} with no strong rival, {counts['short']} short prompts, {counts['done']} already decided; "
+            f"{sum(1 for r in rows if r['isolated'])} isolated.",
+            "- Scores are TF-IDF cosine on name and description (1.00 = same words). They rank candidates for reading; they do not decide.",
+        ]
+        if len(rows) >= 10 and counts["skip"] + counts["compare"] == 0:
+            lines.append("- No skill in this set reached the compare score. Word scores cannot sort it: read each group below against its rival.")
+        lines.append("")
+
+        groups: dict[tuple[str, str], list[dict]] = {}
+        loners = []
+        for r in rows:
+            if r["kind"] in ("done", "short"):
+                continue
+            if r["best_rival"] and r["best"] >= _ANALYSE_GROUP_FLOOR:
+                groups.setdefault((r["best_rival"]["name"], r["best_rival"]["source"]), []).append(r)
+            else:
+                loners.append(r)
+        if groups or loners:
+            lines += ["## Read in this order", "",
+                      "Each line is a rival skill we already have, then the prey whose nearest rival it is. Read the rival, then each prey against it.", ""]
+            ordered = sorted(groups.items(), key=lambda kv: max(r["best"] for r in kv[1]), reverse=True)
+            for (name, source), members in ordered:
+                members.sort(key=lambda r: r["best"], reverse=True)
+                prey_str = ", ".join(f"`{r['key']}` {r['best']:.2f}" for r in members)
+                lines.append(f"- `{name}` ({source}): {prey_str}")
+            if loners:
+                lines.append(f"- No rival above {_ANALYSE_GROUP_FLOOR:.2f} (new territory or unrelated): "
+                             + ", ".join(f"`{r['key']}`" for r in loners))
+            lines.append("")
+        shorts = [r for r in rows if r["kind"] == "short"]
+        if shorts:
+            lines += [f"## Short prompts (under {_SHORT_PROMPT_WORDS} words of body)", "",
+                      ", ".join(f"`{r['key']}`" for r in shorts), ""]
+        lines += ["## Each skill", ""]
+
+    for r in rows:
+        iso_note = " | **ISOLATED: read sealed files before promoting**" if r["isolated"] else ""
+        lines.append(f"### `{r['key']}`")
+        lines.append("")
+        lines.append(f"- Verdict: {r['verdict']}{iso_note}")
+        lines.append(f"- Licence: `{r['licence']}` | Lock state: `{r['state']}`")
+        if r["rivals"]:
+            rival_str = ", ".join(f"`{t['name']}` ({t['source']}, {s:.2f})" for s, t in r["rivals"])
+            lines.append(f"- Nearest rivals: {rival_str}")
+        else:
+            lines.append("- Nearest rivals: none")
+        lines.append("")
 
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
     out_path = cfg.out_dir / f"{today}-analyse.md"
-    out_path.write_text("\n".join(lines), encoding="utf-8")
+    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return out_path
 
 

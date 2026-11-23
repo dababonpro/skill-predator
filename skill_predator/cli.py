@@ -40,7 +40,10 @@ def main(argv: list[str] | None = None) -> int:
 
     p_devour = sub.add_parser("devour", help="devour and isolate skill pack(s) into the stomach")
     _add_common(p_devour)
-    p_devour.add_argument("--url", default=None, help="git URL to clone into the stomach")
+    p_devour.add_argument(
+        "--url", default=None,
+        help="git URL to clone into the stomach, or a GitHub folder link (.../tree/<ref>/<path>) to sparse-clone one folder",
+    )
     p_devour.add_argument("--path", default=None, help="local pack folder to copy/register in the stomach")
 
     p_analyse = sub.add_parser("analyse", help="compare stomach prey against territory rivals")

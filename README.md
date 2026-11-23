@@ -22,10 +22,15 @@ skill-predator hunt --root . --for "systematic debugging"
 # Clone and isolate an external skill pack into the stomach (~/.skill-sources by default)
 skill-predator devour --root . --url https://github.com/obra/superpowers
 
+# A GitHub folder link clones only that folder (sparse checkout), for packs inside a monorepo.
+# Each skill's licence is read from the nearest LICENSE file up to the pack root.
+skill-predator devour --root . --url https://github.com/cursor/plugins/tree/main/pstack
+
 # Or copy a local pack. Pass only one of --url or --path.
 skill-predator devour --root . --path ~/packs/some-skill
 
-# Compare devoured prey against local skills
+# Compare devoured prey against local skills. The report opens with a summary, a reading
+# order grouped by each prey's nearest local rival, and a list of short prompt-only skills.
 skill-predator analyse --root .
 
 # Mine session transcripts for skill upgrades (evolve) and combinations (fuse)

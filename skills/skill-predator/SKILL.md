@@ -27,7 +27,7 @@ Hunt, devour, isolate, analyse, and selectively absorb agent skills without losi
 
 ```bash
 skill-predator hunt --root . [--for "<job in words>"]
-skill-predator devour --root . [--url <git url> | --path <folder>]
+skill-predator devour --root . [--url <git url or GitHub folder link> | --path <folder>]
 skill-predator analyse --root . [--pack <name>]
 skill-predator evolve --root . [--min-cooccur 2]
 skill-predator update --root . [--fetch]

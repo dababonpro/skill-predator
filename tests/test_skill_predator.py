@@ -203,6 +203,91 @@ def test_devour_url_clone_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
         devour_packs(cfg, "2026-11-19", url="https://example.invalid/nope.git")
 
 
+def test_licence_in_pack_subfolder_is_found(tmp_path: Path):
+    # cursor/plugins keeps pstack's LICENSE in pstack/, not at the repo root; devour read "unknown".
+    from skill_predator.core import detect_pack_licence, detect_skill_licence
+
+    pack = tmp_path / "plugins"
+    sub = pack / "pstack"
+    skill = _write_skill(sub / "skills", "correct", "Fix repeated agent mistakes.").parent
+    (sub / "LICENSE").write_text("MIT License\nPermission is hereby granted, free of charge", encoding="utf-8")
+    other = _write_skill(pack / "other" / "skills", "x", "Unlicensed skill.").parent
+
+    assert detect_pack_licence(pack) == "unknown"
+    assert detect_skill_licence(skill, pack) == "MIT"
+    assert detect_skill_licence(other, pack) == "unknown"
+
+    (pack / "LICENCE.txt").write_text("Apache License\nVersion 2.0", encoding="utf-8")
+    assert detect_pack_licence(pack) == "Apache-2.0"
+    assert detect_skill_licence(other, pack) == "Apache-2.0"
+    assert detect_skill_licence(skill, pack) == "MIT"  # nearest file wins
+
+    cfg = PredatorConfig.load(tmp_path / "ws", stomach_dir=tmp_path)
+    cfg.skills_dir.mkdir(parents=True, exist_ok=True)
+    text = devour_packs(cfg, "2026-11-23", path=pack).read_text(encoding="utf-8")
+    assert "Licence: `Apache-2.0`" in text
+    assert "`correct`: **clean** (licence=MIT)" in text
+    lock = json.loads((cfg.skills_dir / "sources.json").read_text(encoding="utf-8"))
+    assert lock["prey"]["plugins/correct"]["licence"] == "MIT"
+
+
+def test_github_folder_link_is_sparse_cloned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    import skill_predator.core as core
+
+    assert core.parse_github_tree_url("https://github.com/cursor/plugins/tree/main/pstack") == (
+        "https://github.com/cursor/plugins.git", "main", "pstack")
+    assert core.parse_github_tree_url("https://github.com/o/r/tree/v2/a/b/") == ("https://github.com/o/r.git", "v2", "a/b")
+    assert core.parse_github_tree_url("https://github.com/obra/superpowers") is None
+    assert core._pack_name_from_url("https://github.com/cursor/plugins/tree/main/pstack") == "pstack"
+    assert core._pack_name_from_url("https://github.com/obra/superpowers.git") == "superpowers"
+
+    calls = []
+
+    class Done:
+        returncode = 0
+        stderr = ""
+        stdout = ""
+
+    monkeypatch.setattr(core, "_run_git", lambda args, timeout=60: calls.append(args) or Done())
+    core._clone_pack("https://github.com/cursor/plugins/tree/main/pstack", tmp_path / "pstack")
+    assert calls[0][:4] == ["clone", "--filter=blob:none", "--no-checkout", "--"]
+    assert calls[1][-4:] == ["sparse-checkout", "set", "--", "pstack"]
+    assert calls[2][-3:] == ["checkout", "main", "--"]
+
+    calls.clear()
+    core._clone_pack("https://github.com/obra/superpowers", tmp_path / "sp")
+    assert calls == [["clone", "--", "https://github.com/obra/superpowers", str(tmp_path / "sp")]]
+
+
+def test_analyse_groups_large_pack_by_rival(tmp_path: Path):
+    # On a 61-skill pack plain word overlap gave every skill the same verdict and no reading order.
+    long_body = "## Steps\n" + " ".join(f"step{i}" for i in range(120)) + "\n"
+    root = tmp_path / "ws"
+    _write_skill(root / "skills", "feature-map", "Record what each feature must keep doing and prove it with a regression check.", long_body)
+    _write_skill(root / "skills", "queue-run", "Work through a batch list one item at a time with a queue file.", long_body)
+
+    stomach = tmp_path / "stomach"
+    skills = stomach / "big" / "skills"
+    _write_skill(skills, "maintain-map", "Keep the feature map honest with a regression check per feature.", long_body)
+    _write_skill(skills, "batch-worker", "Process a batch list item by item from a queue.", long_body)
+    _write_skill(skills, "tiny", "Restate the goal in your own words.", "Restate the goal.\n")
+    for i in range(8):
+        _write_skill(skills, f"loner-{i}", f"Unrelated topic zeta{i} omega{i}.", long_body)
+
+    cfg = PredatorConfig.load(root, stomach_dir=stomach, projects_dir=tmp_path / "none",
+                              plugins_dir=tmp_path / "none", marketplaces_dir=tmp_path / "none")
+    (cfg.skills_dir / "sources.json").write_text(json.dumps({"skills": {}, "prey": {}}), encoding="utf-8")
+
+    text = write_analyse(cfg, "2026-11-23").read_text(encoding="utf-8")
+    assert "## Summary" in text and "11 skill(s)" in text
+    order = text.split("## Read in this order", 1)[1].split("## Short prompts", 1)[0]
+    assert "- `feature-map` (own): `big/maintain-map`" in order
+    assert "- `queue-run` (own): `big/batch-worker`" in order
+    assert "No rival above" in order and "`big/loner-0`" in order
+    assert "`big/tiny`" in text.split("## Short prompts", 1)[1].split("## Each skill", 1)[0]
+    assert "short prompt" in text.split("### `big/tiny`", 1)[1]
+
+
 def test_excrete_dry_run_does_not_move(tmp_path: Path):
     root = tmp_path / "ws"
     _write_skill(root / "skills", "old-skill", "Legacy workflow to retire.")
